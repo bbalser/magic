@@ -1,6 +1,8 @@
 defmodule Magic do
   @quoted_term quote do: term
 
+  defstruct [:env, :behaviour, :mock, :functions, :overrides]
+
   defmacro __using__(opts) do
     quote do
       @before_compile Magic
@@ -25,83 +27,76 @@ defmodule Magic do
   end
 
   defp do_magic(env) do
-    opts = Module.get_attribute(env.module, :magic_opts, [])
+    Module.get_attribute(env.module, :magic_opts, [])
+    |> Keyword.put(:env, env)
+    |> to_struct()
+    |> maybe_generate_behaviour()
+    |> generate_mock()
+    |> generate_overrides()
+    |> to_ast()
+  end
 
-    behaviour = get_behaviour(env, opts)
-    mock = get_mock(env, opts)
-    Mox.defmock(mock, for: behaviour)
-
-    overrides = generate_overrides(env, opts, mock)
-
+  defp to_ast(state) do
     quote do
       if Module.get_attribute(__MODULE__, :behaviour) == [] do
-        @behaviour unquote(behaviour)
+        @behaviour unquote(state.behaviour)
       end
 
-      defoverridable unquote(behaviour)
+      defoverridable unquote(state.behaviour)
 
-      unquote(overrides)
+      unquote(state.overrides)
     end
   end
 
-  defp generate_overrides(env, opts, mock) do
-    functions = get_functions(env, opts)
+  defp generate_mock(%{mock: nil} = state) do
+    %{state | mock: Module.concat(state.env.module, Mock)}
+    |> generate_mock()
+  end
 
-    Enum.map(functions, fn {name, args} ->
-      quote do
-        def unquote(name)(unquote_splicing(args)) do
-          all_callers = [self() | Magic.caller_pids()]
+  defp generate_mock(state) do
+    Mox.defmock(state.mock, for: state.behaviour)
+    state
+  end
 
-          case Mox.Server.fetch_fun_to_dispatch(
-                 all_callers,
-                 {unquote(mock), unquote(name), unquote(length(args))}
-               ) do
-            :no_expectation ->
-              super(unquote_splicing(args))
+  defp generate_overrides(state) do
+    functions =
+      state.behaviour.behaviour_info(:callbacks)
+      |> Enum.map(fn {name, arity} ->
+        {name, Macro.generate_arguments(arity, state.env.module)}
+      end)
 
-            _ ->
-              apply(unquote(mock), unquote(name), unquote(args))
+    overrides =
+      Enum.map(functions, fn {name, args} ->
+        quote do
+          def unquote(name)(unquote_splicing(args)) do
+            caller_pids =
+              case Process.get(:"$callers") do
+                nil -> []
+                pids when is_list(pids) -> pids
+              end
+
+            all_callers = [self() | caller_pids]
+
+            case Mox.Server.fetch_fun_to_dispatch(
+                   all_callers,
+                   {unquote(state.mock), unquote(name), unquote(length(args))}
+                 ) do
+              :no_expectation ->
+                super(unquote_splicing(args))
+
+              _ ->
+                apply(unquote(state.mock), unquote(name), unquote(args))
+            end
           end
         end
-      end
-    end)
+      end)
+
+    %{state | overrides: overrides}
   end
 
-  defp get_mock(env, opts) do
-    case Keyword.has_key?(opts, :mock) do
-      true -> Keyword.get(opts, :mock)
-      false -> Module.concat(env.module, Mock)
-    end
-  end
-
-  defp get_behaviour(env, opts) do
-    case Keyword.has_key?(opts, :behaviour) do
-      true ->
-        Keyword.get(opts, :behaviour)
-
-      false ->
-        functions = get_functions(env, opts)
-        generate_behaviour(env.module, functions)
-    end
-  end
-
-  defp get_functions(env, opts) do
-    case Keyword.has_key?(opts, :behaviour) do
-      true ->
-        behaviour = Keyword.get(opts, :behaviour)
-
-        behaviour.behaviour_info(:callbacks)
-        |> Enum.map(fn {name, arity} ->
-          {name, Macro.generate_arguments(arity, env.module)}
-        end)
-
-      false ->
-        Module.get_attribute(env.module, :magic_functions, [])
-    end
-  end
-
-  defp generate_behaviour(module, functions) do
-    behaviour = Module.concat(module, Behaviour)
+  defp maybe_generate_behaviour(%{behaviour: nil, env: env} = state) do
+    behaviour = Module.concat(env.module, Behaviour)
+    functions = Module.get_attribute(env.module, :magic_functions, [])
 
     contents =
       Enum.map(functions, fn {name, args} ->
@@ -114,13 +109,12 @@ defmodule Magic do
 
     Module.create(behaviour, contents, Macro.Env.location(__ENV__))
 
-    behaviour
+    %{state | behaviour: behaviour}
   end
 
-  def caller_pids do
-    case Process.get(:"$callers") do
-      nil -> []
-      pids when is_list(pids) -> pids
-    end
+  defp maybe_generate_behaviour(state), do: state
+
+  defp to_struct(opts) do
+    struct!(__MODULE__, opts)
   end
 end
