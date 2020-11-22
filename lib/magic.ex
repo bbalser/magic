@@ -1,5 +1,4 @@
 defmodule Magic do
-
   @quoted_term quote do: term
 
   defmacro __using__(opts) do
@@ -32,7 +31,7 @@ defmodule Magic do
     mock = get_mock(env, opts)
     Mox.defmock(mock, for: behaviour)
 
-    overrides = generate_overrides(env, mock)
+    overrides = generate_overrides(env, opts, mock)
 
     quote do
       if Module.get_attribute(__MODULE__, :behaviour) == [] do
@@ -45,8 +44,8 @@ defmodule Magic do
     end
   end
 
-  defp generate_overrides(env, mock) do
-    functions = Module.get_attribute(env.module, :magic_functions, [])
+  defp generate_overrides(env, opts, mock) do
+    functions = get_functions(env, opts)
 
     Enum.map(functions, fn {name, args} ->
       quote do
@@ -81,8 +80,23 @@ defmodule Magic do
         Keyword.get(opts, :behaviour)
 
       false ->
-        functions = Module.get_attribute(env.module, :magic_functions, [])
+        functions = get_functions(env, opts)
         generate_behaviour(env.module, functions)
+    end
+  end
+
+  defp get_functions(env, opts) do
+    case Keyword.has_key?(opts, :behaviour) do
+      true ->
+        behaviour = Keyword.get(opts, :behaviour)
+
+        behaviour.behaviour_info(:callbacks)
+        |> Enum.map(fn {name, arity} ->
+          {name, Macro.generate_arguments(arity, env.module)}
+        end)
+
+      false ->
+        Module.get_attribute(env.module, :magic_functions, [])
     end
   end
 

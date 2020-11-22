@@ -11,4 +11,8 @@ defmodule Example2 do
   def multiply(a, b) do
     a * b
   end
+
+  def divide(a, b) do
+    a / b
+  end
 end
